@@ -106,6 +106,20 @@ metadata:
   name: deployment-sa
   namespace: kuberhealthy
 ---
+# Source: kuberhealthy/templates/khcheck-pod-restarts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-restart-sa
+  namespace: kuberhealthy
+---
+# Source: kuberhealthy/templates/khcheck-pod-status.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-status-sa
+  namespace: kuberhealthy
+---
 # Source: kuberhealthy/templates/serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -195,6 +209,46 @@ rules:
     verbs:
     - create
 ---
+# Source: kuberhealthy/templates/khcheck-deployment.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deployment-service-role
+rules:
+  - apiGroups:
+      - "apps"
+    resources:
+      - deployments
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+---
 # Source: kuberhealthy/templates/check-reaper.yaml
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding
@@ -238,6 +292,20 @@ subjects:
   name: kuberhealthy
   namespace: kuberhealthy
 ---
+# Source: kuberhealthy/templates/khcheck-deployment.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deployment-check-rb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployment-service-role
+subjects:
+  - kind: ServiceAccount
+    name: deployment-sa
+    namespace: kuberhealthy
+---
 # Source: kuberhealthy/templates/khcheck-daemonset.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -262,40 +330,35 @@ rules:
       - update
       - watch
 ---
-# Source: kuberhealthy/templates/khcheck-deployment.yaml
+# Source: kuberhealthy/templates/khcheck-pod-restarts.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: deployment-service-role
+  name: pod-restart-role
   namespace: kuberhealthy
 rules:
   - apiGroups:
-      - "apps"
+      - ""
     resources:
-      - deployments
+      - pods
     verbs:
       - create
       - delete
       - get
       - list
-      - patch
-      - update
       - watch
+---
+# Source: kuberhealthy/templates/khcheck-pod-status.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-status-role
+  namespace: kuberhealthy
+rules:
   - apiGroups:
       - ""
     resources:
-      - services
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - ""
-    resources:
+      - namespaces
       - pods
     verbs:
       - get
@@ -316,19 +379,33 @@ subjects:
   - kind: ServiceAccount
     name: daemonset-khcheck
 ---
-# Source: kuberhealthy/templates/khcheck-deployment.yaml
+# Source: kuberhealthy/templates/khcheck-pod-restarts.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: deployment-check-rb
+  name: pod-restart-rb
   namespace: kuberhealthy
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: deployment-service-role
+  name: pod-restart-role
 subjects:
   - kind: ServiceAccount
-    name: deployment-sa
+    name: pod-restart-sa
+---
+# Source: kuberhealthy/templates/khcheck-pod-status.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-status-rb
+  namespace: kuberhealthy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-status-role
+subjects:
+  - kind: ServiceAccount
+    name: pod-status-sa
 ---
 # Source: kuberhealthy/templates/service.yaml
 apiVersion: v1
@@ -472,6 +549,10 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: CHECK_POD_TIMEOUT
             value: "10m"
         image: kuberhealthy/daemonset-check:v3.1.0
@@ -504,6 +585,10 @@ spec:
       image: kuberhealthy/deployment-check:v1.6.0
       imagePullPolicy: IfNotPresent
       env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         - name: CHECK_DEPLOYMENT_REPLICAS
           value: "4"
         - name: CHECK_DEPLOYMENT_ROLLING_UPDATE
@@ -542,6 +627,14 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: spec.nodeName
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
           - name: HOSTNAME
             value: "kubernetes.default"
         image: kuberhealthy/dns-resolution-check:v1.4.0
@@ -554,6 +647,93 @@ spec:
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
+---
+# Source: kuberhealthy/templates/khcheck-network-connection.yaml
+apiVersion: comcast.github.io/v1
+kind: KuberhealthyCheck
+metadata:
+  name: network-connection-check
+  namespace: kuberhealthy
+spec:
+  runInterval:  30m
+  timeout: 10m
+  podSpec:
+    containers:
+    - name: deployment
+      image: kuberhealthy/network-connection-check:v0.1.1
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: CONNECTION_TARGET
+          value: "tcp://github.com:443"
+      resources:
+        requests:
+          memory: 5Mi
+      restartPolicy: Never
+---
+# Source: kuberhealthy/templates/khcheck-pod-restarts.yaml
+apiVersion: comcast.github.io/v1
+kind: KuberhealthyCheck
+metadata:
+  name: pod-restarts
+spec:
+  runInterval: 5m
+  timeout: 10m
+  podSpec:
+    securityContext:
+      runAsUser: 999
+      fsGroup: 999
+    containers:
+      - env:
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: MAX_FAILURES_ALLOWED
+            value: "10"
+        image: kuberhealthy/pod-restarts-check:v2.3.0
+        imagePullPolicy: IfNotPresent
+        name: main
+        resources:
+          requests:
+            cpu: 10m
+            memory: 50Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+    restartPolicy: Never
+    serviceAccountName: pod-restart-sa
+---
+# Source: kuberhealthy/templates/khcheck-pod-status.yaml
+apiVersion: comcast.github.io/v1
+kind: KuberhealthyCheck
+metadata:
+  name: pod-status
+spec:
+  runInterval: 5m
+  timeout: 15m
+  podSpec:
+    securityContext:
+      runAsUser: 999
+      fsGroup: 999
+    containers:
+      - env:
+          - name: SKIP_DURATION
+            value: "10m"
+          - name: TARGET_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+        image: kuberhealthy/pod-status-check:v1.2.2
+        imagePullPolicy: IfNotPresent
+        name: main
+        resources:
+          requests:
+            cpu: 10m
+            memory: 50Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+    serviceAccountName: pod-status-sa
 ---
 # Source: kuberhealthy/templates/servicemonitor.yaml
 apiVersion: monitoring.coreos.com/v1
